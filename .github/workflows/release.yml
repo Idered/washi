@@ -71,6 +71,13 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME doesn't match Cargo.toml version $version"; exit 1; }
+      - name: Check the npm token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then echo "No NPM_TOKEN secret; relying on trusted publishing"; exit 0; fi
+          echo "NPM_TOKEN is ${#NODE_AUTH_TOKEN} characters"
+          echo "Logged in to npm as $(npm whoami)"
       - name: Pack
         run: node npm/scripts/pack.js bins
       # Staged: the packages are uploaded but stay private until a maintainer approves them with 2FA
