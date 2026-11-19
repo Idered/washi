@@ -31,9 +31,7 @@ These are shown at 800×450. The commands render at the default 1920×1080 with 
 Build and install with [Cargo](https://rustup.rs):
 
 ```bash
-git clone https://github.com/Idered/washi.git
-cd washi
-cargo install --path .
+cargo install --git https://github.com/Idered/washi
 ```
 
 This puts `washi` and `washi-mcp` in `~/.cargo/bin`. To add the server to Claude Code:

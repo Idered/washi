@@ -87,7 +87,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          flags="--access public"
+          flags="--access public --provenance"
           [[ "$GITHUB_REF" == refs/tags/* ]] || flags="$flags --dry-run"
           # Platform packages first, so the launcher's optional dependencies exist when it's approved.
           # Each package is tried even if an earlier one fails, and versions already on npm are skipped,
