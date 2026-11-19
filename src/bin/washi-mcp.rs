@@ -3,19 +3,23 @@
 //! The protocol is handled by hand (JSON-RPC, one message per line), with no SDK and no async
 //! runtime, so the process waiting for calls takes a few MB.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use base64::Engine;
-use washi::core::{DEFAULT_PALETTE, DITHERS, Opts, PALETTES, SHADES, SkyParams, TONEMAPS, TYPES, render, save_png, type_names};
-use washi::sheet::contact_sheet;
 use image::RgbImage;
 use serde_json::{Map, Value, json};
+use washi::core::{
+    DEFAULT_PALETTE, DITHERS, MAX_SIZE, MIN_SIZE, Opts, PALETTES, RANGES, SHADES, SkyParams, TONEMAPS, TYPES,
+    render, save_png, type_names,
+};
+use washi::sheet::contact_sheet;
 
-const INSTRUCTIONS: &str = "Generates gradient backgrounds (mesh, flow, aurora, ...) as PNG with grain/dithering. \
-Start with preview_types to compare types for a palette, then call generate_gradient at the target size. \
-The returned path is the finished file; the preview in the response is downscaled.";
+const INSTRUCTIONS: &str = "Generates grainy gradient backgrounds (mesh, sky, aurora, ...) as PNG files. \
+Start with preview_types to compare types in a palette (or preview_seeds to compare layouts), then call \
+generate_gradient at the target size. Results include the saved file's path and a downscaled preview.";
 
 /// Large buffers (images, noise) go straight to mmap/munmap. The system malloc on macOS keeps freed
 /// large blocks in its cache, so after a single 4K render the process held on to ~1 GB. This way
@@ -83,105 +87,218 @@ static ALLOC: BigBuffersToMmap = BigBuffersToMmap;
 
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
-// --- tool schemas -------------------------------------------------------------------------------
+/// Protocol version agreed on in `initialize`.
+static NEGOTIATED: OnceLock<String> = OnceLock::new();
+
+/// `resource_link` content exists since protocol version 2025-06-18; older clients don't know it.
+fn supports_resource_links() -> bool {
+    NEGOTIATED.get().is_some_and(|v| v.as_str() >= "2025-06-18")
+}
+
+// --- tool schemas ------------------------------------------------------------------------------
+
+fn with_description(mut schema: Value, description: &str) -> Value {
+    schema["description"] = description.into();
+    schema
+}
+
+fn string_enum(values: &[&str], default: &str, description: &str) -> Value {
+    with_description(json!({"type": "string", "enum": values, "default": default}), description)
+}
+
+/// Number with its allowed range taken from `RANGES`, so the schema matches the server's checks.
+fn number(name: &str, default: Option<f64>, description: &str) -> Value {
+    let mut s = json!({"type": "number"});
+    if let Some(r) = RANGES.iter().find(|r| r.name == name) {
+        s[if r.exclusive_min { "exclusiveMinimum" } else { "minimum" }] = r.min.into();
+        if let Some(max) = r.max {
+            s["maximum"] = max.into();
+        }
+    }
+    if let Some(d) = default {
+        s["default"] = d.into();
+    }
+    with_description(s, description)
+}
+
+fn size(default: usize, description: &str) -> Value {
+    with_description(
+        json!({"type": "integer", "minimum": MIN_SIZE, "maximum": MAX_SIZE, "default": default}),
+        description,
+    )
+}
+
+fn object(properties: Value) -> Value {
+    json!({"type": "object", "properties": properties, "additionalProperties": false})
+}
+
+fn annotations(title: &str, read_only: bool) -> Value {
+    if read_only {
+        json!({"title": title, "readOnlyHint": true, "openWorldHint": false})
+    } else {
+        // writes a PNG; with an explicit output_path it may replace an existing PNG
+        json!({"title": title, "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false})
+    }
+}
 
 fn tools() -> Value {
     let types = type_names();
-    let str_enum = |vals: &[&str], default: &str| json!({"type": "string", "enum": vals, "default": default});
-    let num = |default: f64| json!({"type": "number", "default": default});
-    let opt_num = || json!({"anyOf": [{"type": "number"}, {"type": "null"}], "default": null});
-    let opt_str = || json!({"anyOf": [{"type": "string"}, {"type": "null"}], "default": null});
-    let colors = json!({"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}], "default": null});
+    let palettes: Vec<&str> = PALETTES.iter().map(|p| p.name).collect();
+    let palette = string_enum(&palettes, DEFAULT_PALETTE, "Named palette (see list_palettes). Ignored when colors is given.");
+    let colors = with_description(
+        json!({"type": "array", "items": {"type": "string", "pattern": "^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$"}, "minItems": 2}),
+        "Custom hex colors instead of a palette, e.g. [\"#03060F\", \"#12B886\", \"#7048E8\"]. \
+         3-6 shades of one color family work best; any order (they're sorted dark to light).",
+    );
+    let dither = string_enum(
+        &DITHERS,
+        "grain",
+        "Final texture: grain (film grain), bayer (visible 8x8 retro pattern), none (only an invisible 1-bit dither against banding).",
+    );
+    let grain = number("grain", Some(0.035), "Grain strength: 0.02 subtle, 0.06 strong. Used with dither=grain.");
+    let shade = string_enum(
+        &SHADES,
+        "none",
+        "Darken part of the image so content on top stays readable: left (text on the left), bottom (rows at the bottom), center.",
+    );
+    let output_path = with_description(
+        json!({"type": "string"}),
+        "Where to save the PNG; must end in .png. Relative paths are resolved inside the output folder \
+         (~/Pictures/washi, or $WASHI_OUT). Default: a new timestamped file in that folder. \
+         An existing PNG at this path is replaced; any other existing file is never overwritten.",
+    );
+    let seed = with_description(
+        json!({"type": "integer", "minimum": 0, "default": 1}),
+        "Layout seed. The same seed and settings always produce the same image.",
+    );
 
     json!([
         {
             "name": "generate_gradient",
-            "description": "Generates a background and saves it as PNG. Returns the path and (optionally) a downscaled preview.\n\n\
-type: background type (list_types describes each).\n\
-palette: a named palette (list_palettes); ignored when colors is given.\n\
-colors: custom hex colors (3-6 shades of one family work best), any order - sorted by luminance.\n\
-rotate: rotates the layout by 0/90/180/270 degrees (e.g. 180 = light at the bottom instead of the top).\n\
-noise: overlay noise in % (grey overlay layer, opacity noise/200); pairs well with dither=\"none\".\n\
-rain: rain streak density (0.5 light rain, 1.5 downpour). snow: snowflakes (0.5 flurries, 1.5 blizzard).\n\
-scale, warp, wind: type=\"sky\" only - cloud size, distortion and wind in % (default 45/50/40).\n\
-start_t: sky only - animation time (e.g. 20.75); without it the frame depends on the seed.\n\
-seed: a different seed = a different layout with the same colors.\n\
-dither: grain (film grain), bayer (visible 8x8 retro pattern), none (only an invisible 1 LSB dither against banding).\n\
-grain: grain strength, 0.02 subtle .. 0.06 strong. grain_size: grain size in px (1 fine, 2-3 coarser).\n\
-tonemap: overrides the type's default (reinhard / aces / none). exposure: brightness multiplier before tonemapping.\n\
-shade: darkening under content (left - text on the left, bottom - rows at the bottom, center); shade_strength 0..1.\n\
-stars: star density (by default only aurora, ~0.6).\n\
-output_path: where to save; default ~/Pictures/washi/<type>-<time>.png.",
-            "inputSchema": {"type": "object", "properties": {
-                "type": str_enum(&types, "mesh"),
-                "palette": {"type": "string", "default": DEFAULT_PALETTE},
+            "title": "Generate gradient",
+            "description": "Render a grainy gradient background and save it as a PNG. Returns the file's path and a downscaled JPEG preview.",
+            "inputSchema": object(json!({
+                "type": string_enum(&types, "mesh", "Background type. Call list_types for a description of each."),
+                "palette": palette,
                 "colors": colors,
-                "width": {"type": "integer", "default": 1920},
-                "height": {"type": "integer", "default": 1080},
-                "seed": {"type": "integer", "default": 1},
-                "dither": str_enum(&DITHERS, "grain"),
-                "grain": num(0.035),
-                "grain_size": num(1.0),
-                "tonemap": {"anyOf": [{"type": "string", "enum": TONEMAPS}, {"type": "null"}], "default": null},
-                "exposure": num(1.0),
-                "shade": str_enum(&SHADES, "none"),
-                "shade_strength": num(0.55),
-                "stars": opt_num(),
-                "rotate": {"type": "integer", "enum": [0, 90, 180, 270], "default": 0},
-                "noise": num(0.0),
-                "rain": num(0.0),
-                "snow": num(0.0),
-                "scale": opt_num(),
-                "warp": opt_num(),
-                "wind": opt_num(),
-                "start_t": opt_num(),
-                "output_path": opt_str(),
-                "preview": {"type": "boolean", "default": true},
-            }},
+                "width": size(1920, "Image width in px."),
+                "height": size(1080, "Image height in px."),
+                "seed": seed,
+                "dither": dither,
+                "grain": grain,
+                "grain_size": number("grain_size", Some(1.0), "Grain size in px: 1 fine, 2-3 coarser."),
+                "noise": number("noise", Some(0.0), "Grey overlay noise in %, e.g. 8. Pairs well with dither=none."),
+                "shade": shade,
+                "shade_strength": number("shade_strength", Some(0.55), "How strongly shade darkens, 0-1."),
+                "rotate": with_description(
+                    json!({"type": "integer", "enum": [0, 90, 180, 270], "default": 0}),
+                    "Rotate the layout, in degrees. 180 puts the light part at the bottom.",
+                ),
+                "exposure": number(
+                    "exposure",
+                    Some(1.0),
+                    "Brightness multiplier before tonemapping: below 1 is darker (e.g. 0.45 for a night sky), above 1 brighter.",
+                ),
+                "tonemap": with_description(
+                    json!({"type": "string", "enum": TONEMAPS}),
+                    "Override the type's default tonemapping (aurora uses aces, everything else none).",
+                ),
+                "stars": number("stars", None, "Star density, e.g. 0.6. By default only aurora has stars."),
+                "rain": number("rain", Some(0.0), "Rain streak density: 0.5 light rain, 1.5 downpour."),
+                "snow": number("snow", Some(0.0), "Snowflake density: 0.5 flurries, 1.5 blizzard."),
+                "scale": number("scale", None, "type=sky only: cloud scale in % (default 45)."),
+                "warp": number("warp", None, "type=sky only: cloud distortion in % (default 50)."),
+                "wind": number("wind", None, "type=sky only: wind in % (default 40)."),
+                "start_t": with_description(
+                    json!({"type": "number"}),
+                    "type=sky only: animation time, e.g. 20.75. Without it the frame depends on the seed.",
+                ),
+                "output_path": output_path,
+                "preview": with_description(json!({"type": "boolean", "default": true}), "Include a downscaled JPEG preview in the result."),
+            })),
+            "annotations": annotations("Generate gradient", false),
         },
         {
             "name": "preview_types",
-            "description": "Comparison sheet: several background types (all by default) in one palette, small labeled tiles.\n\n\
-For choosing a direction before generating at full size. Also saves the sheet as PNG.",
-            "inputSchema": {"type": "object", "properties": {
-                "palette": {"type": "string", "default": DEFAULT_PALETTE},
+            "title": "Compare background types",
+            "description": "Render a labeled comparison sheet of background types in one palette, to pick a direction before \
+                generating at full size. Saves the sheet as a PNG and returns a preview.",
+            "inputSchema": object(json!({
+                "types": with_description(
+                    json!({"type": "array", "items": {"type": "string", "enum": types}, "minItems": 1}),
+                    "Types to compare. Default: all of them.",
+                ),
+                "palette": palette,
                 "colors": colors,
-                "types": {"anyOf": [{"type": "array", "items": {"type": "string", "enum": types}}, {"type": "null"}], "default": null},
-                "seed": {"type": "integer", "default": 1},
-                "dither": str_enum(&DITHERS, "grain"),
-                "grain": num(0.035),
-                "shade": str_enum(&SHADES, "none"),
-                "output_path": opt_str(),
-            }},
+                "seed": with_description(seed.clone(), "Layout seed, used for every tile on the sheet."),
+                "dither": dither,
+                "grain": grain,
+                "shade": shade,
+                "output_path": output_path,
+            })),
+            "annotations": annotations("Compare background types", false),
         },
         {
             "name": "preview_seeds",
-            "description": "Comparison sheet of one type across several seeds (1..6 by default) - for picking a layout.",
-            "inputSchema": {"type": "object", "properties": {
-                "type": str_enum(&types, "mesh"),
-                "palette": {"type": "string", "default": DEFAULT_PALETTE},
+            "title": "Compare seeds",
+            "description": "Render a labeled comparison sheet of one type across several seeds, to pick a layout. \
+                Saves the sheet as a PNG and returns a preview.",
+            "inputSchema": object(json!({
+                "type": string_enum(&types, "mesh", "Background type. Call list_types for a description of each."),
+                "seeds": with_description(
+                    json!({"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 1}),
+                    "Seeds to compare. Default: 1-6.",
+                ),
+                "palette": palette,
                 "colors": colors,
-                "seeds": {"anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "null"}], "default": null},
-                "dither": str_enum(&DITHERS, "grain"),
-                "grain": num(0.035),
-                "shade": str_enum(&SHADES, "none"),
-                "output_path": opt_str(),
-            }},
+                "dither": dither,
+                "grain": grain,
+                "shade": shade,
+                "output_path": output_path,
+            })),
+            "annotations": annotations("Compare seeds", false),
         },
         {
             "name": "list_types",
-            "description": "Background types with a description and their default tonemapping.",
-            "inputSchema": {"type": "object", "properties": {}},
+            "title": "List background types",
+            "description": "List the background types with a description, default tonemapping and default star density.",
+            "inputSchema": object(json!({})),
+            "outputSchema": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "tonemap": {"type": "string", "enum": TONEMAPS},
+                        "stars": {"type": "number"},
+                    },
+                    "required": ["description", "tonemap", "stars"],
+                },
+            },
+            "annotations": annotations("List background types", true),
         },
         {
             "name": "list_palettes",
-            "description": "Named palettes: colors from dark to light and a short description.",
-            "inputSchema": {"type": "object", "properties": {}},
+            "title": "List palettes",
+            "description": "List the named palettes with their colors (dark to light) and a short description.",
+            "inputSchema": object(json!({})),
+            "outputSchema": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "colors": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["description", "colors"],
+                },
+            },
+            "annotations": annotations("List palettes", true),
         },
     ])
 }
 
-// --- arguments ----------------------------------------------------------------------------------
+// --- arguments ---------------------------------------------------------------------------------
 
 struct Args<'a>(&'a Map<String, Value>);
 
@@ -254,6 +371,16 @@ fn bad(key: &str, expected: &str) -> String {
     format!("invalid argument {key:?}: expected {expected}")
 }
 
+/// Rejects arguments the tool's schema doesn't declare, so typos don't get silently ignored.
+fn check_known_args(tool: &Value, args: &Map<String, Value>) -> Result<(), String> {
+    let known = tool["inputSchema"]["properties"].as_object().map(|p| p.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
+    match args.keys().find(|k| !known.contains(k)) {
+        None => Ok(()),
+        Some(k) if known.is_empty() => Err(format!("unknown argument {k:?}; this tool takes no arguments")),
+        Some(k) => Err(format!("unknown argument {k:?}; expected one of: {}", known.join(", "))),
+    }
+}
+
 /// Settings shared by the sheets and generate_gradient.
 fn base_opts(a: &Args, kind_default: &str) -> Result<Opts, String> {
     let seed = a.int_or("seed", 1)?;
@@ -272,7 +399,7 @@ fn base_opts(a: &Args, kind_default: &str) -> Result<Opts, String> {
     })
 }
 
-// --- tools --------------------------------------------------------------------------------------
+// --- output files ------------------------------------------------------------------------------
 
 fn out_dir() -> PathBuf {
     match std::env::var_os("WASHI_OUT") {
@@ -303,21 +430,76 @@ fn timestamp() -> String {
     }
 }
 
+fn is_png(path: &Path) -> bool {
+    let mut sig = [0u8; 8];
+    std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut sig)).is_ok() && sig == *b"\x89PNG\r\n\x1a\n"
+}
+
+/// Resolves where to save. An explicit path must end in .png and may only replace an existing PNG;
+/// a default path is a new timestamped file that never replaces anything.
 fn out_path(path: Option<String>, stem: &str) -> Result<PathBuf, String> {
+    let dir = out_dir();
     let p = match path {
-        Some(p) if p == "~" => home(),
-        Some(p) if p.starts_with("~/") => home().join(&p[2..]),
-        Some(p) => PathBuf::from(p),
-        None => out_dir().join(format!("{stem}-{}.png", timestamp())),
+        Some(raw) => {
+            let p = match raw.strip_prefix("~/") {
+                Some(rest) => home().join(rest),
+                None => PathBuf::from(&raw),
+            };
+            let p = if p.is_relative() { dir.join(p) } else { p };
+            if !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+                return Err(format!("output_path must end in .png (got {raw:?})"));
+            }
+            if p.is_dir() {
+                return Err(format!("{} is a folder, not a file", p.display()));
+            }
+            if p.exists() && !is_png(&p) {
+                return Err(format!("{} already exists and isn't a PNG; refusing to overwrite it", p.display()));
+            }
+            p
+        }
+        None => {
+            let base = format!("{stem}-{}", timestamp());
+            let mut p = dir.join(format!("{base}.png"));
+            let mut n = 2;
+            while p.exists() {
+                p = dir.join(format!("{base}-{n}.png"));
+                n += 1;
+            }
+            p
+        }
     };
-    if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
     Ok(p)
 }
 
+// --- results -----------------------------------------------------------------------------------
+
 fn text(s: impl Into<String>) -> Value {
     json!({"type": "text", "text": s.into()})
+}
+
+/// `file://` URI for an absolute path, percent-encoding everything but unreserved characters and '/'.
+fn file_uri(path: &Path) -> String {
+    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut uri = String::from("file://");
+    for b in abs.to_string_lossy().bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
+            uri.push(b as char);
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri
+}
+
+/// Link to the saved PNG, for clients that support `resource_link` content.
+fn png_link(path: &Path) -> Option<Value> {
+    supports_resource_links().then(|| {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        json!({"type": "resource_link", "uri": file_uri(path), "name": name, "mimeType": "image/png"})
+    })
 }
 
 /// Downscaled JPEG preview for the response.
@@ -337,6 +519,18 @@ fn preview(img: &RgbImage, max_w: u32) -> Result<Value, String> {
     Ok(json!({"type": "image", "data": base64::engine::general_purpose::STANDARD.encode(&buf), "mimeType": "image/jpeg"}))
 }
 
+/// Text summary, link to the file and (optionally) a preview.
+fn saved(msg: String, path: &Path, img: Option<(&RgbImage, u32)>) -> Result<Vec<Value>, String> {
+    let mut content = vec![text(msg)];
+    content.extend(png_link(path));
+    if let Some((img, max_w)) = img {
+        content.push(preview(img, max_w)?);
+    }
+    Ok(content)
+}
+
+// --- tools -------------------------------------------------------------------------------------
+
 fn generate_gradient(a: &Args) -> Result<Vec<Value>, String> {
     let t0 = Instant::now();
     let rotate = a.int_or("rotate", 0)?;
@@ -345,14 +539,14 @@ fn generate_gradient(a: &Args) -> Result<Vec<Value>, String> {
     }
     let size = |key, default| -> Result<usize, String> {
         let v = a.int_or(key, default)?;
-        usize::try_from(v).map_err(|_| "size must be 16..8192 px".to_string())
+        usize::try_from(v).map_err(|_| format!("size must be {MIN_SIZE}..{MAX_SIZE} px"))
     };
     let opts = Opts {
         width: size("width", 1920)?,
         height: size("height", 1080)?,
         grain_size: a.f64_or("grain_size", 1.0)?,
         tonemap: match a.str_opt("tonemap")? {
-            Some(t) if !TONEMAPS.contains(&t.as_str()) => return Err(bad("tonemap", "none, reinhard, aces or null")),
+            Some(t) if !TONEMAPS.contains(&t.as_str()) => return Err(bad("tonemap", "none, reinhard or aces")),
             t => t,
         },
         exposure: a.f64_or("exposure", 1.0)?,
@@ -365,23 +559,17 @@ fn generate_gradient(a: &Args) -> Result<Vec<Value>, String> {
         sky: SkyParams { scale: a.num("scale")?, warp: a.num("warp")?, wind: a.num("wind")?, time: a.num("start_t")? },
         ..base_opts(a, "mesh")?
     };
-    let img = render(&opts)?;
     let path = out_path(a.str_opt("output_path")?, &opts.kind)?;
+    let img = render(&opts)?;
     save_png(&img, &path, true)?;
-    let msg = format!(
-        "Saved {} ({}x{}, {:.1}s)",
-        path.display(),
-        opts.width,
-        opts.height,
-        t0.elapsed().as_secs_f64()
-    );
-    if a.bool_or("preview", true)? { Ok(vec![text(msg), preview(&img, 768)?]) } else { Ok(vec![text(msg)]) }
+    let msg = format!("Saved {} ({}x{}, {:.1}s)", path.display(), opts.width, opts.height, t0.elapsed().as_secs_f64());
+    saved(msg, &path, a.bool_or("preview", true)?.then_some((&img, 768)))
 }
 
 fn sheet_result(variants: Vec<(String, Opts)>, path: &Path) -> Result<Vec<Value>, String> {
     let sheet = contact_sheet(&variants)?;
     save_png(&sheet, path, false)?;
-    Ok(vec![text(format!("Sheet: {}", path.display())), preview(&sheet, 1200)?])
+    saved(format!("Sheet: {}", path.display()), path, Some((&sheet, 1200)))
 }
 
 fn preview_types(a: &Args) -> Result<Vec<Value>, String> {
@@ -396,8 +584,9 @@ fn preview_types(a: &Args) -> Result<Vec<Value>, String> {
         }
         _ => names.iter().map(|s| s.to_string()).collect(),
     };
+    let path = out_path(a.str_opt("output_path")?, "sheet")?;
     let variants = types.into_iter().map(|t| (t.clone(), Opts { kind: t, ..base.clone() })).collect();
-    sheet_result(variants, &out_path(a.str_opt("output_path")?, "sheet")?)
+    sheet_result(variants, &path)
 }
 
 fn preview_seeds(a: &Args) -> Result<Vec<Value>, String> {
@@ -414,8 +603,9 @@ fn preview_seeds(a: &Args) -> Result<Vec<Value>, String> {
             .collect::<Result<_, _>>()?,
         _ => vec![1, 2, 3, 4, 5, 6],
     };
+    let path = out_path(a.str_opt("output_path")?, &format!("{}-seeds", base.kind))?;
     let variants = seeds.iter().map(|&s| (format!("{} · seed {s}", base.kind), Opts { seed: s, ..base.clone() })).collect();
-    sheet_result(variants, &out_path(a.str_opt("output_path")?, &format!("{}-seeds", base.kind))?)
+    sheet_result(variants, &path)
 }
 
 fn structured(v: Value) -> Value {
@@ -438,23 +628,26 @@ fn list_palettes() -> Value {
 
 fn call_tool(params: &Value) -> Result<Value, (i64, String)> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
-    let empty = Map::new();
-    let args = Args(params.get("arguments").and_then(Value::as_object).unwrap_or(&empty));
-    let result = match name {
-        "generate_gradient" => generate_gradient(&args),
-        "preview_types" => preview_types(&args),
-        "preview_seeds" => preview_seeds(&args),
-        "list_types" => return Ok(list_types()),
-        "list_palettes" => return Ok(list_palettes()),
-        _ => return Err((-32602, format!("Unknown tool: {name}"))),
+    let tools = tools();
+    let Some(tool) = tools.as_array().and_then(|t| t.iter().find(|t| t["name"] == name)) else {
+        return Err((-32602, format!("Unknown tool: {name}")));
     };
-    Ok(match result {
-        Ok(content) => json!({"content": content, "isError": false}),
-        Err(e) => json!({"content": [text(format!("Error in {name}: {e}"))], "isError": true}),
-    })
+    let empty = Map::new();
+    let raw = params.get("arguments").and_then(Value::as_object).unwrap_or(&empty);
+    let args = Args(raw);
+    let content = |c: Vec<Value>| json!({"content": c, "isError": false});
+    let result = check_known_args(tool, raw).and_then(|()| match name {
+        "generate_gradient" => generate_gradient(&args).map(content),
+        "preview_types" => preview_types(&args).map(content),
+        "preview_seeds" => preview_seeds(&args).map(content),
+        "list_types" => Ok(list_types()),
+        _ => Ok(list_palettes()),
+    });
+    // tool failures go back as results the model can read and act on, not as protocol errors
+    Ok(result.unwrap_or_else(|e| json!({"content": [text(format!("Error in {name}: {e}"))], "isError": true})))
 }
 
-// --- JSON-RPC loop ------------------------------------------------------------------------------
+// --- JSON-RPC loop -----------------------------------------------------------------------------
 
 fn handle(msg: &Value) -> Option<Value> {
     let id = msg.get("id")?.clone(); // no id = a notification, no reply
@@ -464,10 +657,11 @@ fn handle(msg: &Value) -> Option<Value> {
         "initialize" => {
             let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or_default();
             let version = if PROTOCOL_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSIONS[0] };
+            let _ = NEGOTIATED.set(version.to_string());
             Ok(json!({
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": {"name": "washi", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "washi", "title": "washi", "version": env!("CARGO_PKG_VERSION")},
                 "instructions": INSTRUCTIONS,
             }))
         }

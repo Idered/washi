@@ -1010,6 +1010,79 @@ fn check(name: &str, value: &str, allowed: &[&str]) -> Result<(), String> {
     if allowed.contains(&value) { Ok(()) } else { Err(format!("{name}: {}", allowed.join(" | "))) }
 }
 
+pub const MIN_SIZE: usize = 16;
+pub const MAX_SIZE: usize = 8192;
+
+/// Allowed range of a numeric setting. Used both to validate renders and to build the MCP schema,
+/// so the two can't drift apart.
+pub struct Range {
+    pub name: &'static str,
+    pub min: f64,
+    pub max: Option<f64>,
+    /// min itself is not allowed (value must be > min)
+    pub exclusive_min: bool,
+}
+
+const fn range(name: &'static str, min: f64, max: Option<f64>) -> Range {
+    Range { name, min, max, exclusive_min: false }
+}
+
+pub const RANGES: &[Range] = &[
+    range("grain", 0.0, None),
+    Range { exclusive_min: true, ..range("grain_size", 0.0, None) },
+    range("exposure", 0.0, None),
+    range("shade_strength", 0.0, Some(1.0)),
+    range("stars", 0.0, None),
+    range("noise", 0.0, Some(100.0)),
+    range("rain", 0.0, None),
+    range("snow", 0.0, None),
+    range("scale", 0.0, None),
+    range("warp", 0.0, None),
+    range("wind", 0.0, None),
+];
+
+impl Range {
+    fn allows(&self, v: f64) -> bool {
+        v.is_finite()
+            && if self.exclusive_min { v > self.min } else { v >= self.min }
+            && self.max.is_none_or(|m| v <= m)
+    }
+
+    fn describe(&self) -> String {
+        match (self.max, self.exclusive_min) {
+            (Some(max), _) => format!("between {} and {max}", self.min),
+            (None, true) => format!("greater than {}", self.min),
+            (None, false) => format!("at least {}", self.min),
+        }
+    }
+}
+
+fn check_ranges(o: &Opts) -> Result<(), String> {
+    let values = [
+        ("grain", Some(o.grain)),
+        ("grain_size", Some(o.grain_size)),
+        ("exposure", Some(o.exposure)),
+        ("shade_strength", Some(o.shade_strength)),
+        ("stars", o.stars),
+        ("noise", Some(o.noise)),
+        ("rain", Some(o.rain)),
+        ("snow", Some(o.snow)),
+        ("scale", o.sky.scale),
+        ("warp", o.sky.warp),
+        ("wind", o.sky.wind),
+    ];
+    for (name, v) in values {
+        let r = RANGES.iter().find(|r| r.name == name).expect("range for every numeric setting");
+        if let Some(v) = v.filter(|&v| !r.allows(v)) {
+            return Err(format!("{name} must be {} (got {v})", r.describe()));
+        }
+    }
+    if o.sky.time.is_some_and(|t| !t.is_finite()) {
+        return Err("time must be a finite number".into());
+    }
+    Ok(())
+}
+
 /// Renders an 8-bit RGB image.
 pub fn render(o: &Opts) -> Result<RgbImage, String> {
     let kind = TYPES
@@ -1017,17 +1090,15 @@ pub fn render(o: &Opts) -> Result<RgbImage, String> {
         .find(|k| k.name == o.kind)
         .ok_or_else(|| format!("unknown type {:?}; available: {}", o.kind, type_names().join(", ")))?;
     let (width, height) = (o.width, o.height);
-    if !(16..=8192).contains(&width) || !(16..=8192).contains(&height) {
-        return Err("size must be 16..8192 px".into());
+    if !(MIN_SIZE..=MAX_SIZE).contains(&width) || !(MIN_SIZE..=MAX_SIZE).contains(&height) {
+        return Err(format!("size must be {MIN_SIZE}..{MAX_SIZE} px"));
     }
     let ramp = Ramp::new(&resolve_stops(o.palette.as_deref(), o.colors.as_deref())?)?;
     let tm = o.tonemap.as_deref().unwrap_or(kind.tonemap);
     check("tonemap", tm, &TONEMAPS)?;
     check("shade", &o.shade, &SHADES)?;
     check("dither", &o.dither, &DITHERS)?;
-    if o.grain_size.is_nan() || o.grain_size <= 0.0 {
-        return Err("grain_size must be > 0".into());
-    }
+    check_ranges(o)?;
     let mut rng = Rng::new(o.seed);
 
     let fw = if kind.full_res { width } else { width.min(FIELD_MAX_W) };

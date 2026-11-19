@@ -95,7 +95,13 @@ washi mesh tv.png -p night --shade left
 | `list_types` | Types with descriptions |
 | `list_palettes` | Palettes with their colors |
 
-Images are saved to `~/Pictures/washi` unless you pass `output_path` or set `WASHI_OUT`.
+Images are saved to `~/Pictures/washi`, or to `$WASHI_OUT` if it's set. Each call creates a new timestamped file there unless you pass `output_path`:
+
+- It must end in `.png`.
+- Relative paths are resolved inside the output folder.
+- An existing PNG at that path is replaced, but any other existing file is never overwritten.
+
+Every parameter has a description and limits in the tool schema, and the server enforces the same limits. Unknown arguments are rejected instead of ignored. Results include a text summary, a downscaled JPEG preview and, for clients on protocol 2025-06-18 or newer, a `resource_link` to the saved PNG.
 
 ## How it works
 
@@ -114,6 +120,6 @@ The MCP server speaks JSON-RPC over stdio directly, without an SDK or async runt
 ## Development
 
 ```bash
-cargo test --release    # includes a check that seeds still render the same images
+cargo test --release    # image checks (seeds still render the same) and MCP protocol tests
 cargo build --release
 ```
