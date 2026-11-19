@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// Launcher; replaced by the native binary on install when possible (see install.js).
+require("../lib/run.js").run("washi-mcp");

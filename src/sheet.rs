@@ -11,6 +11,8 @@ fn font() -> Option<FontVec> {
         ("/System/Library/Fonts/SFNS.ttf", 0),
         ("/System/Library/Fonts/Helvetica.ttc", 0),
         ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
+        ("C:\\Windows\\Fonts\\segoeui.ttf", 0),
+        ("C:\\Windows\\Fonts\\arial.ttf", 0),
     ] {
         if let Some(f) = std::fs::read(path).ok().and_then(|d| FontVec::try_from_vec_and_index(d, index).ok()) {
             return Some(f);

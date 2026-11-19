@@ -1,0 +1,17 @@
+{
+  "name": "washi-mcp",
+  "version": "0.0.0",
+  "description": "Grainy, textured gradient backgrounds as PNG: an MCP server and CLI",
+  "keywords": ["mcp", "mcp-server", "gradient", "background", "wallpaper", "grain", "dither"],
+  "repository": { "type": "git", "url": "git+https://github.com/Idered/washi.git" },
+  "bin": {
+    "washi-mcp": "bin/washi-mcp",
+    "washi": "bin/washi"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": ["bin", "lib", "install.js"],
+  "engines": { "node": ">=18" },
+  "optionalDependencies": {}
+}

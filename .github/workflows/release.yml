@@ -1,0 +1,80 @@
+# Builds washi for every platform and publishes the npm packages (npx washi-mcp).
+#
+# Release: bump `version` in Cargo.toml, commit, then push a matching tag:
+#   git tag v0.1.0 && git push origin v0.1.0
+# Running it by hand from the Actions tab builds everything and does a dry run of the publish.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+          - os: ubuntu-latest
+            targets: x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+          - os: windows-latest
+            targets: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    env:
+      # static musl binaries linked with Rust's bundled lld, so no cross toolchain is needed
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        shell: bash
+        run: |
+          for t in ${{ matrix.targets }}; do
+            rustup target add "$t"
+            cargo build --release --locked --target "$t"
+            mkdir -p "bins/$t"
+            cp target/$t/release/washi{,-mcp}{,.exe} "bins/$t/" 2>/dev/null || true
+            ls -l "bins/$t"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bins-${{ matrix.os }}
+          path: bins/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: bins-*
+          path: bins
+          merge-multiple: true
+      - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME doesn't match Cargo.toml version $version"; exit 1; }
+      - name: Pack
+        run: node npm/scripts/pack.js bins
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          flags="--access public"
+          [[ "$GITHUB_REF" == refs/tags/* ]] || flags="$flags --dry-run"
+          # platform packages first, so the launcher's optional dependencies exist when it's published
+          for dir in dist/npm/washi-mcp-*/ dist/npm/washi-mcp/; do
+            (cd "$dir" && npm publish $flags)
+          done

@@ -15,15 +15,19 @@ washi sheet types.png -p peach        # every type side by side
 
 ## Install
 
-```bash
-cargo install --path .
-```
-
-This puts `washi` and `washi-mcp` in `~/.cargo/bin`. To add the server to Claude Code:
+Add the server to Claude Code with npx, which downloads a prebuilt binary for macOS, Linux or Windows:
 
 ```bash
-claude mcp add -s user washi -- ~/.cargo/bin/washi-mcp
+claude mcp add -s user washi -- npx -y washi-mcp
 ```
+
+Other MCP clients use the same command in their config:
+
+```json
+{ "mcpServers": { "washi": { "command": "npx", "args": ["-y", "washi-mcp"] } } }
+```
+
+The CLI comes in the same package: `npx -p washi-mcp washi aurora out.png`. To build both from source instead, run `cargo install --path .`, which puts `washi` and `washi-mcp` in `~/.cargo/bin`.
 
 ## Types
 
@@ -123,3 +127,5 @@ The MCP server speaks JSON-RPC over stdio directly, without an SDK or async runt
 cargo test --release    # image checks (seeds still render the same) and MCP protocol tests
 cargo build --release
 ```
+
+To release, bump `version` in `Cargo.toml`, commit, and push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`). The Release workflow builds every platform and publishes the npm packages: `washi-mcp` and one `washi-mcp-<platform>` package per platform, holding its binaries. It needs an `NPM_TOKEN` repository secret.

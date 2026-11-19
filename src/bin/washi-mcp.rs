@@ -24,66 +24,69 @@ generate_gradient at the target size. Results include the saved file's path and 
 /// Large buffers (images, noise) go straight to mmap/munmap. The system malloc on macOS keeps freed
 /// large blocks in its cache, so after a single 4K render the process held on to ~1 GB. This way
 /// memory goes back to the system as soon as a buffer is freed, and the idle server takes a few MB.
-struct BigBuffersToMmap;
+#[cfg(unix)]
+mod big_buffers {
+    struct BigBuffersToMmap;
 
-const BIG: usize = 128 << 10;
+    const BIG: usize = 128 << 10;
 
-fn is_big(size: usize, align: usize) -> bool {
-    size >= BIG && align <= 4096
-}
-
-unsafe impl std::alloc::GlobalAlloc for BigBuffersToMmap {
-    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
-        if !is_big(l.size(), l.align()) {
-            return unsafe { std::alloc::System.alloc(l) };
-        }
-        let p = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                l.size(),
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        if p == libc::MAP_FAILED { std::ptr::null_mut() } else { p.cast() }
+    fn is_big(size: usize, align: usize) -> bool {
+        size >= BIG && align <= 4096
     }
 
-    unsafe fn alloc_zeroed(&self, l: std::alloc::Layout) -> *mut u8 {
-        if is_big(l.size(), l.align()) {
-            unsafe { self.alloc(l) } // pages from mmap are already zeroed
-        } else {
-            unsafe { std::alloc::System.alloc_zeroed(l) }
+    unsafe impl std::alloc::GlobalAlloc for BigBuffersToMmap {
+        unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+            if !is_big(l.size(), l.align()) {
+                return unsafe { std::alloc::System.alloc(l) };
+            }
+            let p = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    l.size(),
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANON,
+                    -1,
+                    0,
+                )
+            };
+            if p == libc::MAP_FAILED { std::ptr::null_mut() } else { p.cast() }
         }
-    }
 
-    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
-        if is_big(l.size(), l.align()) {
-            unsafe { libc::munmap(p.cast(), l.size()) };
-        } else {
-            unsafe { std::alloc::System.dealloc(p, l) }
-        }
-    }
-
-    unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, new_size: usize) -> *mut u8 {
-        if !is_big(l.size(), l.align()) && !is_big(new_size, l.align()) {
-            return unsafe { std::alloc::System.realloc(p, l, new_size) };
-        }
-        let new_l = unsafe { std::alloc::Layout::from_size_align_unchecked(new_size, l.align()) };
-        let np = unsafe { self.alloc(new_l) };
-        if !np.is_null() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(p, np, l.size().min(new_size));
-                self.dealloc(p, l);
+        unsafe fn alloc_zeroed(&self, l: std::alloc::Layout) -> *mut u8 {
+            if is_big(l.size(), l.align()) {
+                unsafe { self.alloc(l) } // pages from mmap are already zeroed
+            } else {
+                unsafe { std::alloc::System.alloc_zeroed(l) }
             }
         }
-        np
-    }
-}
 
-#[global_allocator]
-static ALLOC: BigBuffersToMmap = BigBuffersToMmap;
+        unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+            if is_big(l.size(), l.align()) {
+                unsafe { libc::munmap(p.cast(), l.size()) };
+            } else {
+                unsafe { std::alloc::System.dealloc(p, l) }
+            }
+        }
+
+        unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, new_size: usize) -> *mut u8 {
+            if !is_big(l.size(), l.align()) && !is_big(new_size, l.align()) {
+                return unsafe { std::alloc::System.realloc(p, l, new_size) };
+            }
+            let new_l = unsafe { std::alloc::Layout::from_size_align_unchecked(new_size, l.align()) };
+            let np = unsafe { self.alloc(new_l) };
+            if !np.is_null() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(p, np, l.size().min(new_size));
+                    self.dealloc(p, l);
+                }
+            }
+            np
+        }
+    }
+
+    #[global_allocator]
+    static ALLOC: BigBuffersToMmap = BigBuffersToMmap;
+}
 
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -409,11 +412,12 @@ fn out_dir() -> PathBuf {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default()
 }
 
+/// Local time as YYYYMMDD-HHMMSS, for default file names.
+#[cfg(unix)]
 fn timestamp() -> String {
-    // local time, like time.strftime('%Y%m%d-%H%M%S')
     unsafe {
         let t = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
@@ -428,6 +432,24 @@ fn timestamp() -> String {
             tm.tm_sec
         )
     }
+}
+
+/// UTC elsewhere (only used for file names, so the time zone doesn't matter much).
+#[cfg(not(unix))]
+fn timestamp() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // civil-from-days (Howard Hinnant's algorithm)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
 fn is_png(path: &Path) -> bool {
@@ -483,9 +505,14 @@ fn text(s: impl Into<String>) -> Value {
 /// `file://` URI for an absolute path, percent-encoding everything but unreserved characters and '/'.
 fn file_uri(path: &Path) -> String {
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut s = abs.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        // C:\a\b.png (canonicalize adds a \\?\ prefix) -> /C:/a/b.png
+        s = format!("/{}", s.trim_start_matches(r"\\?\").replace('\\', "/"));
+    }
     let mut uri = String::from("file://");
-    for b in abs.to_string_lossy().bytes() {
-        if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/:".contains(&b) {
             uri.push(b as char);
         } else {
             uri.push_str(&format!("%{b:02X}"));
