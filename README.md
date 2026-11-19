@@ -27,7 +27,17 @@ Other MCP clients use the same command in their config:
 { "mcpServers": { "washi": { "command": "npx", "args": ["-y", "washi-mcp"] } } }
 ```
 
-The CLI comes in the same package: `npx -p washi-mcp washi aurora out.png`. To build both from source instead, run `cargo install --path .`, which puts `washi` and `washi-mcp` in `~/.cargo/bin`.
+The CLI comes in the same package: `npx -p washi-mcp washi aurora out.png`.
+
+The server itself uses about 2 MB, but `npx` keeps npm running next to it (about 55 MB more). For a lighter setup, install it once and point the config at the installed command:
+
+```bash
+npm install -g washi-mcp                                 # about 13 MB with the Node launcher
+claude mcp add -s user washi -- washi-mcp
+
+cargo install --path .                                   # about 2 MB, no Node at all
+claude mcp add -s user washi -- ~/.cargo/bin/washi-mcp
+```
 
 ## Types
 
@@ -128,4 +138,4 @@ cargo test --release    # image checks (seeds still render the same) and MCP pro
 cargo build --release
 ```
 
-To release, bump `version` in `Cargo.toml`, commit, and push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`). The Release workflow builds every platform and publishes the npm packages: `washi-mcp` and one `washi-mcp-<platform>` package per platform, holding its binaries. It needs an `NPM_TOKEN` repository secret.
+To release, bump `version` in `Cargo.toml`, commit, and push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`). The Release workflow builds every platform and stages the npm packages: `washi-mcp` and one `washi-mcp-<platform>` package per platform, holding its binaries. Staged packages go public once you approve them with 2FA on npmjs.com (Account > Staged Packages). The workflow authenticates with an `NPM_TOKEN` repository secret, a granular token with "Read and write (stage only)" access, or with npm trusted publishing once that's set up.

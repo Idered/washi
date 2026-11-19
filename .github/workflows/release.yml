@@ -1,8 +1,9 @@
-# Builds washi for every platform and publishes the npm packages (npx washi-mcp).
+# Builds washi for every platform and stages the npm packages (npx washi-mcp) for approval.
 #
 # Release: bump `version` in Cargo.toml, commit, then push a matching tag:
 #   git tag v0.1.0 && git push origin v0.1.0
-# Running it by hand from the Actions tab builds everything and does a dry run of the publish.
+# Approve the staged packages on npmjs.com afterwards. Running the workflow by hand from the
+# Actions tab builds everything and does a dry run of the publish.
 name: Release
 
 on:
@@ -50,12 +51,16 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # for npm trusted publishing (OIDC), once it's set up
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest # staged publishing needs npm 11.15+
       - uses: actions/download-artifact@v5
         with:
           pattern: bins-*
@@ -68,13 +73,15 @@ jobs:
           [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME doesn't match Cargo.toml version $version"; exit 1; }
       - name: Pack
         run: node npm/scripts/pack.js bins
-      - name: Publish
+      # Staged: the packages are uploaded but stay private until a maintainer approves them with 2FA
+      # (npmjs.com > Account > Staged Packages, or `npm stage list` + `npm stage approve <id>`).
+      # Auth is the NPM_TOKEN secret (a "stage only" granular token) or, once configured, trusted publishing.
+      - name: Stage publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           flags="--access public"
           [[ "$GITHUB_REF" == refs/tags/* ]] || flags="$flags --dry-run"
-          # platform packages first, so the launcher's optional dependencies exist when it's published
           for dir in dist/npm/washi-mcp-*/ dist/npm/washi-mcp/; do
-            (cd "$dir" && npm publish $flags)
+            (cd "$dir" && npm stage publish $flags)
           done
