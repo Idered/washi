@@ -139,3 +139,7 @@ cargo build --release
 ```
 
 To release, bump `version` in `Cargo.toml`, commit, and push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`). The Release workflow builds every platform and stages the npm packages: `washi-mcp` and one `washi-mcp-<platform>` package per platform, holding its binaries. Staged packages go public once you approve them with 2FA on npmjs.com (Account > Staged Packages). The workflow authenticates with an `NPM_TOKEN` repository secret, a granular token with "Read and write (stage only)" access, or with npm trusted publishing once that's set up.
+
+## License
+
+MIT

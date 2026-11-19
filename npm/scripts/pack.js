@@ -51,12 +51,14 @@ for (const [key, target] of Object.entries(platforms)) {
     name,
     version,
     description: `The ${key} binaries for ${main.name}. Install ${main.name} instead of this package.`,
+    license: main.license,
     repository: main.repository,
     os: [os],
     cpu: [cpu],
     files: ["bin"],
     preferUnplugged: true,
   });
+  fs.copyFileSync(path.join(root, "LICENSE"), path.join(dir, "LICENSE"));
   write(dir, "README.md", `# ${name}\n\nThe \`${target}\` binaries for [\`${main.name}\`](https://www.npmjs.com/package/${main.name}). Install that package instead.\n`);
   built.push(name);
 }
@@ -64,6 +66,7 @@ for (const [key, target] of Object.entries(platforms)) {
 const dir = path.join(out, main.name);
 fs.cpSync(path.join(root, "npm/washi-mcp"), dir, { recursive: true });
 fs.copyFileSync(path.join(root, "README.md"), path.join(dir, "README.md"));
+fs.copyFileSync(path.join(root, "LICENSE"), path.join(dir, "LICENSE"));
 write(dir, "package.json", {
   ...main,
   version,
