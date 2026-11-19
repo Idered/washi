@@ -89,6 +89,13 @@ jobs:
         run: |
           flags="--access public"
           [[ "$GITHUB_REF" == refs/tags/* ]] || flags="$flags --dry-run"
+          # Platform packages first, so the launcher's optional dependencies exist when it's approved.
+          # Each package is tried even if an earlier one fails, and versions already on npm are skipped,
+          # so a failed release can simply be re-run.
+          failed=()
           for dir in dist/npm/washi-mcp-*/ dist/npm/washi-mcp/; do
-            (cd "$dir" && npm stage publish $flags)
+            spec=$(node -p "const p = require('./$dir/package.json'); p.name + '@' + p.version")
+            if npm view "$spec" version >/dev/null 2>&1; then echo "$spec is already published, skipping"; continue; fi
+            (cd "$dir" && npm stage publish $flags) || failed+=("$spec")
           done
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::Not staged: ${failed[*]}"; exit 1; fi
