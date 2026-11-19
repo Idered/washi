@@ -13,6 +13,19 @@ washi sky storm.png -p storm --rain 1 --noise 8
 washi sheet types.png -p peach        # every type side by side
 ```
 
+## Examples
+
+| | |
+|---|---|
+| ![aurora](docs/aurora.png) | ![dunes](docs/dunes.png) |
+| `washi aurora out.png -p borealis` | `washi dunes out.png -p sunset` |
+| ![warp](docs/warp.png) | ![glow](docs/glow.png) |
+| `washi warp out.png -p amethyst` | `washi glow out.png -p deep-sea` |
+| ![storm](docs/storm.png) | ![sand](docs/sand.png) |
+| `washi sky out.png -p storm -d none --noise 8 --scale 52 --warp 62 --wind 58 --rain 1` | `washi grainy out.png -p citrus --grain-size 2 --grain 0.05` |
+
+These are shown at 800×450. The commands render at the default 1920×1080 with the same layout.
+
 ## Install
 
 Build and install with [Cargo](https://rustup.rs):
