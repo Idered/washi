@@ -15,28 +15,24 @@ washi sheet types.png -p peach        # every type side by side
 
 ## Install
 
-Add the server to Claude Code with npx, which downloads a prebuilt binary for macOS, Linux or Windows:
+Build and install with [Cargo](https://rustup.rs):
 
 ```bash
-claude mcp add -s user washi -- npx -y washi-mcp
+git clone https://github.com/Idered/washi.git
+cd washi
+cargo install --path .
 ```
 
-Other MCP clients use the same command in their config:
+This puts `washi` and `washi-mcp` in `~/.cargo/bin`. To add the server to Claude Code:
+
+```bash
+claude mcp add -s user washi -- ~/.cargo/bin/washi-mcp
+```
+
+Other MCP clients take the same command in their config:
 
 ```json
-{ "mcpServers": { "washi": { "command": "npx", "args": ["-y", "washi-mcp"] } } }
-```
-
-The CLI comes in the same package: `npx -p washi-mcp washi aurora out.png`.
-
-The server itself uses about 2 MB, but `npx` keeps npm running next to it (about 55 MB more). For a lighter setup, install it once and point the config at the installed command:
-
-```bash
-npm install -g washi-mcp                                 # about 13 MB with the Node launcher
-claude mcp add -s user washi -- washi-mcp
-
-cargo install --path .                                   # about 2 MB, no Node at all
-claude mcp add -s user washi -- ~/.cargo/bin/washi-mcp
+{ "mcpServers": { "washi": { "command": "/Users/you/.cargo/bin/washi-mcp" } } }
 ```
 
 ## Types
