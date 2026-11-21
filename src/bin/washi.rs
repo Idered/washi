@@ -28,12 +28,13 @@ struct Args {
     height: usize,
     #[arg(short, long, default_value_t = 1)]
     seed: u64,
-    #[arg(short, long, default_value = "grain", value_parser = ["grain", "bayer", "none"])]
+    /// final texture; hatch = two-color print pattern
+    #[arg(short, long, default_value = "grain", value_parser = ["grain", "bayer", "hatch", "none"])]
     dither: String,
-    /// grain strength (0.02 subtle, 0.06 strong)
+    /// grain strength (0.02 subtle, 0.06 strong); with hatch: how irregular the pattern is
     #[arg(short, long, default_value_t = 0.035)]
     grain: f64,
-    /// grain size in px (1 = fine)
+    /// grain size in px (1 = fine); with hatch: size of one pattern square
     #[arg(long, default_value_t = 1.0)]
     grain_size: f64,
     #[arg(long, value_parser = ["none", "reinhard", "aces"])]

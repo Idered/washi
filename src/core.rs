@@ -916,12 +916,72 @@ const BAYER8: [[u8; 8]; 8] = [
     [63, 31, 55, 23, 61, 29, 53, 21],
 ];
 
-pub const DITHERS: [&str; 3] = ["grain", "bayer", "none"];
+/// Threshold matrix of the hatch dither. As an area gets lighter the pattern goes: dots on a square
+/// grid, staggered dots, dashes, bricks, triangles, then dark cross-hatching, diagonal lines and dots.
+const HATCH4: [[u8; 4]; 4] = [[0, 2, 15, 4], [6, 10, 8, 12], [14, 5, 1, 3], [9, 13, 7, 11]];
+
+pub const DITHERS: [&str; 4] = ["grain", "bayer", "hatch", "none"];
 pub const SHADES: [&str; 4] = ["none", "left", "bottom", "center"];
+
+/// Mean color of the darkest and of the lightest `share` of the image (by `lum`, which is 0..1).
+fn ink_and_paper(img: &Plane<3>, lum: &[f64], share: f64) -> (Rgb, Rgb) {
+    const BINS: usize = 1024;
+    let mut bins = vec![([0.0; 3], 0usize); BINS];
+    for (p, l) in img.px.iter().zip(lum) {
+        let b = &mut bins[((l * BINS as f64) as usize).min(BINS - 1)];
+        b.0 = add(b.0, *p);
+        b.1 += 1;
+    }
+    let want = ((img.px.len() as f64 * share) as usize).max(1);
+    let mean = |bins: &mut dyn Iterator<Item = &(Rgb, usize)>| {
+        let (mut sum, mut n) = ([0.0; 3], 0);
+        for (c, k) in bins {
+            sum = add(sum, *c);
+            n += k;
+            if n >= want {
+                break;
+            }
+        }
+        scale(sum, 1.0 / n as f64)
+    };
+    (mean(&mut bins.iter()), mean(&mut bins.iter().rev()))
+}
+
+/// Two-ink print look: the image is reduced to its darkest color (ink) and its lightest (paper),
+/// and tone becomes a 4x4 pattern of `cell`-px squares. `grain` jitters the tone per square, so
+/// the pattern changes gradually instead of in sharp contour bands.
+fn hatch(img: &mut Plane<3>, grain: f64, cell: f64, rng: &mut Rng) {
+    let (w, h) = (img.w, img.h);
+    let cell = cell.max(1.0);
+    // coverage is measured in linear light, so the image keeps its tone when seen from a distance
+    let lum: Vec<f64> = img.px.iter().map(|&p| dot(map3(p, to_linear), LUMA)).collect();
+    let (ink, paper) = ink_and_paper(img, &lum, 0.02);
+    let (lo, hi) = (dot(map3(ink, to_linear), LUMA), dot(map3(paper, to_linear), LUMA));
+    let span = if hi - lo > 1e-4 { hi - lo } else { f64::INFINITY };
+    let (cw, ch) = ((w as f64 / cell).ceil() as usize, (h as f64 / cell).ceil() as usize);
+    let jitter = rng.normal_vec(cw * ch);
+    // the middle pixel of each square decides for the whole square
+    let mid = |c: usize, len: usize| (((c as f64 + 0.5) * cell) as usize).min(len - 1);
+    img.px = (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let (cx, cy) = (((i % w) as f64 / cell) as usize, ((i / w) as f64 / cell) as usize);
+            let v = clip01((lum[mid(cy, h) * w + mid(cx, w)] - lo) / span);
+            // 1/16..15/16: even the darkest area keeps one paper dot per tile, and the lightest one ink dot
+            let level = 0.0625 + 0.875 * v + jitter[cy * cw + cx] * grain * 0.5;
+            if level * 16.0 > HATCH4[cy % 4][cx % 4] as f64 + 0.5 { paper } else { ink }
+        })
+        .collect();
+}
 
 fn dither(img: &mut Plane<3>, mode: &str, grain: f64, grain_size: f64, rng: &mut Rng) {
     let (w, h) = (img.w, img.h);
     match mode {
+        "hatch" => {
+            // exactly two colors: the 1 LSB dither below would only blur them
+            hatch(img, grain, grain_size, rng);
+            return;
+        }
         "bayer" => {
             // ordered 8x8 dithering + quantization to a few dozen levels: a visible "retro" pattern
             const LEVELS: f64 = 31.0;
@@ -1207,6 +1267,27 @@ mod tests {
                 let diff = got.iter().zip(want).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
                 assert!(diff <= 1, "{name} ({x},{y}): {got:?} != {want:?}");
             }
+        }
+    }
+
+    #[test]
+    fn hatch_uses_two_colors() {
+        for name in ["mesh", "sky", "aurora"] {
+            let opts = Opts {
+                kind: name.into(),
+                width: 96,
+                height: 54,
+                dither: "hatch".into(),
+                grain_size: 2.0,
+                ..Opts::default()
+            };
+            let img = render(&opts).unwrap();
+            let mut colors: Vec<[u8; 3]> = img.pixels().map(|p| p.0).collect();
+            colors.sort();
+            colors.dedup();
+            assert_eq!(colors.len(), 2, "{name}");
+            // squares are grain_size px wide
+            assert!((0..54).all(|y| (0..48).all(|x| img.get_pixel(2 * x, y) == img.get_pixel(2 * x + 1, y))), "{name}");
         }
     }
 

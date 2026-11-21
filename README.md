@@ -82,9 +82,9 @@ You can also pass your own colors in any order with `-c "#03060F,#12B886,#7048E8
 | `-c` | `colors` | | Custom hex colors instead of a palette |
 | `-W`, `-H` | `width`, `height` | 1920×1080 | Size in px (16–8192) |
 | `-s` | `seed` | 1 | Layout; the same seed always gives the same image |
-| `-d` | `dither` | `grain` | `grain` (film grain), `bayer` (retro 8×8 pattern), `none` |
-| `-g` | `grain` | 0.035 | Grain strength: 0.02 subtle, 0.06 strong |
-| `--grain-size` | `grain_size` | 1 | Grain size in px; 2–3 is coarser |
+| `-d` | `dither` | `grain` | `grain` (film grain), `bayer` (retro 8×8 pattern), `hatch` (two-color print pattern), `none` |
+| `-g` | `grain` | 0.035 | Grain strength: 0.02 subtle, 0.06 strong. With `hatch`: how irregular the pattern is |
+| `--grain-size` | `grain_size` | 1 | Grain size in px; 2–3 is coarser. With `hatch`: size of one pattern square |
 | `--noise` | `noise` | 0 | Grey overlay noise, in % |
 | `--shade` | `shade` | `none` | Darken under content: `left`, `bottom`, `center` |
 | `--rotate` | `rotate` | 0 | Rotate the layout: 0, 90, 180, 270 |
@@ -104,7 +104,10 @@ washi sky night.png -p night-sky --rotate 180 --exposure 0.45 --stars 0.7
 washi sky snow.png -p snow --snow 1
 washi grainy sand.png -p citrus --grain-size 2 --grain 0.05
 washi mesh tv.png -p night --shade left
+washi sky print.png -p blue-sky -d hatch --grain-size 2
 ```
+
+`hatch` reduces the image to two colors, its darkest and its lightest, like a one-ink print. Tone becomes a pattern that goes from dots through dashes and bricks to diagonal lines as an area gets lighter. Use `-g 0` for a perfectly regular pattern.
 
 ## MCP tools
 
@@ -126,7 +129,7 @@ Every parameter has a description and limits in the tool schema, and the server 
 
 ## How it works
 
-Each type computes a color field at up to 1280 px wide, which is then scaled to the final size. After that come exposure, tonemapping, sRGB conversion, shading, stars and weather, and finally grain or dithering. A faint 1-bit dither is always added so smooth gradients don't band in 8-bit PNGs.
+Each type computes a color field at up to 1280 px wide, which is then scaled to the final size. After that come exposure, tonemapping, sRGB conversion, shading, stars and weather, and finally grain or dithering. A faint 1-bit dither is always added so smooth gradients don't band in 8-bit PNGs (except with `hatch`, which outputs exactly two colors).
 
 The MCP server speaks JSON-RPC over stdio directly, without an SDK or async runtime. It uses about 2 MB while idle, including after large renders.
 

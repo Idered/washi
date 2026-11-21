@@ -156,9 +156,11 @@ fn tools() -> Value {
     let dither = string_enum(
         &DITHERS,
         "grain",
-        "Final texture: grain (film grain), bayer (visible 8x8 retro pattern), none (only an invisible 1-bit dither against banding).",
+        "Final texture: grain (film grain), bayer (visible 8x8 retro pattern), hatch (two-color print look: the image is \
+         reduced to its darkest and lightest color, with tone drawn as dots, dashes and diagonal lines; set grain_size 2-3), \
+         none (only an invisible 1-bit dither against banding).",
     );
-    let grain = number("grain", Some(0.035), "Grain strength: 0.02 subtle, 0.06 strong. Used with dither=grain.");
+    let grain = number("grain", Some(0.035), "Grain strength: 0.02 subtle, 0.06 strong. With dither=hatch: how irregular the pattern is (0 = clean).");
     let shade = string_enum(
         &SHADES,
         "none",
@@ -189,7 +191,7 @@ fn tools() -> Value {
                 "seed": seed,
                 "dither": dither,
                 "grain": grain,
-                "grain_size": number("grain_size", Some(1.0), "Grain size in px: 1 fine, 2-3 coarser."),
+                "grain_size": number("grain_size", Some(1.0), "Grain size in px: 1 fine, 2-3 coarser. With dither=hatch: size of one pattern square."),
                 "noise": number("noise", Some(0.0), "Grey overlay noise in %, e.g. 8. Pairs well with dither=none."),
                 "shade": shade,
                 "shade_strength": number("shade_strength", Some(0.55), "How strongly shade darkens, 0-1."),
