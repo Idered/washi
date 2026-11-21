@@ -1,19 +1,19 @@
 // Finds the native washi binary for this machine and runs it with the same arguments and stdio.
 const { spawn } = require("node:child_process");
 const { constants } = require("node:os");
-const platforms = require("./platforms.js");
+const { targets, packageName } = require("./platforms.js");
 
 const key = `${process.platform}-${process.arch}`;
 
 /** Path of the native binary (`washi` or `washi-mcp`) from the platform package. */
 function binaryPath(name) {
-  if (!platforms[key]) {
+  if (!targets[key]) {
     throw new Error(
-      `no prebuilt binary for ${key} (available: ${Object.keys(platforms).join(", ")}). ` +
+      `no prebuilt binary for ${key} (available: ${Object.keys(targets).join(", ")}). ` +
         "You can build it from source with `cargo install --git https://github.com/Idered/washi`.",
     );
   }
-  const pkg = `washi-mcp-${key}`;
+  const pkg = packageName(key);
   const exe = process.platform === "win32" ? `${name}.exe` : name;
   try {
     return require.resolve(`${pkg}/bin/${exe}`);

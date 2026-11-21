@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Builds the npm packages from compiled binaries:
 //   dist/npm/washi-mcp             launcher, depends on all platform packages (optional)
-//   dist/npm/washi-mcp-<platform>  the two native binaries for one platform
+//   dist/npm/washi-mcp-<platform>  the two native binaries for one platform (see packageName in platforms.js)
 //
 // usage: node npm/scripts/pack.js <bin-dir> [--allow-missing]
 // <bin-dir>/<rust-target>/ holds washi and washi-mcp (with .exe on Windows), e.g. bins/aarch64-apple-darwin/washi
@@ -9,7 +9,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "../..");
-const platforms = require("../washi-mcp/lib/platforms.js");
+const { targets, packageName } = require("../washi-mcp/lib/platforms.js");
 const [binDir, ...flags] = process.argv.slice(2);
 if (!binDir) {
   console.error("usage: node npm/scripts/pack.js <bin-dir> [--allow-missing]");
@@ -29,7 +29,7 @@ const write = (dir, file, data) => {
 };
 
 const built = [];
-for (const [key, target] of Object.entries(platforms)) {
+for (const [key, target] of Object.entries(targets)) {
   const [os, cpu] = key.split("-");
   const exe = os === "win32" ? ".exe" : "";
   const srcs = ["washi", "washi-mcp"].map((n) => path.join(binDir, target, n + exe));
@@ -39,7 +39,7 @@ for (const [key, target] of Object.entries(platforms)) {
     console.warn(`skipping ${key} (no binaries in ${path.join(binDir, target)})`);
     continue;
   }
-  const name = `${main.name}-${key}`;
+  const name = packageName(key);
   const dir = path.join(out, name);
   fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
   for (const src of srcs) {
@@ -70,7 +70,7 @@ fs.copyFileSync(path.join(root, "LICENSE"), path.join(dir, "LICENSE"));
 write(dir, "package.json", {
   ...main,
   version,
-  optionalDependencies: Object.fromEntries(Object.keys(platforms).map((k) => [`${main.name}-${k}`, version])),
+  optionalDependencies: Object.fromEntries(Object.keys(targets).map((k) => [packageName(k), version])),
 });
 
 console.log(`version ${version}`);
